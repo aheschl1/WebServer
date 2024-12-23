@@ -29,8 +29,7 @@ pub fn routed_service<F, Fut>(
     head: Option<F>,
     connect: Option<F>,
     options: Option<F>,
-    trace: Option<F>,
-    other: Option<F>,
+    trace: Option<F>
 ) -> impl Fn(Request<hyper::body::Incoming>) -> Fut + Copy + Send + Sync + 'static
 where
     F: Copy + Fn(Request<hyper::body::Incoming>) -> Fut + Send + Sync + 'static,
@@ -47,7 +46,6 @@ where
         connect: Option<F>,
         options: Option<F>,
         trace: Option<F>,
-        other: Option<F>,
         request: Request<hyper::body::Incoming>,
     ) -> Fut
     where
@@ -118,19 +116,13 @@ where
                     return not_implemented(request);
                 }
             }
-            _ => {
-                if let Some(f) = other {
-                    return f(request);
-                } else {
-                    return not_implemented(request);
-                }
-            }
+            _ => not_implemented(request)
         }
     }
 
     move |request: Request<hyper::body::Incoming>| {
         inner(
-            not_implemented, get, post, put, delete, patch, head, connect, options, trace, other, request,
+            not_implemented, get, post, put, delete, patch, head, connect, options, trace, request,
         )
     }
 }
