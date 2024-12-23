@@ -1,9 +1,9 @@
 use std::{self};
 use core::net::SocketAddr;
-use async_std::path::Path;
+use async_std::{fs::File, io::ReadExt, path::Path};
 use http_body_util::{combinators::BoxBody, BodyExt};
-use hyper::{body::{Body, Bytes}, Method, Request, Response, StatusCode};
-use server_core::full_box_body;
+use hyper::{body::{Body, Bytes}, header::HeaderName, Method, Request, Response, StatusCode};
+use server_core::{full_box_body, FileOpenStatus};
 use tokio::{self, net::TcpListener};
 
 mod shutdown_utils;
@@ -18,15 +18,34 @@ async fn not_implemented(request: Request<hyper::body::Incoming>) -> Result<Resp
 
 async fn get_handler(request: Request<hyper::body::Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>{
     let request_path = request.uri().path();
-    // check that the path exists, else return a 404
-    if !(Path::new(request_path).exists().await){
-        return Ok(Response::builder()
-            .status(404)
-            .body(full_box_body(format!("Path {} not found", request_path)))
-            .unwrap());
-    }
     // read the file and return it as the response body
-    Ok(Response::new(request.into_body().boxed()))
+
+    let (status, buffer, content_type) = server_core::process_file_request(request_path).await; 
+    match status{
+        FileOpenStatus::DNE => {
+            let response = Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(full_box_body(format!("File {} not found", request_path)))
+                .unwrap();
+            Ok(response)
+        },
+        FileOpenStatus::ERROR => {
+            let response = Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(full_box_body("Internal server error"))
+                .unwrap();
+            Ok(response)
+        },
+        FileOpenStatus::SUCCESS => {
+            let response = Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", content_type.unwrap())
+                .body(full_box_body(buffer.unwrap()))
+                .unwrap();
+            Ok(response)
+        }
+    }
+
 }
 
 async fn router(request: Request<hyper::body::Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>{

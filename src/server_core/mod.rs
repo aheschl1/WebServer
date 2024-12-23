@@ -1,5 +1,7 @@
 use std::future::Future;
 
+use async_std::fs::File;
+use async_std::io::ReadExt;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -77,4 +79,52 @@ pub fn full_box_body<T:Into<Bytes>>(body: T) -> BoxBody<Bytes, hyper::Error>{
     Full::new(body.into())
         .map_err(|n| match n {})
         .boxed()
+}
+
+pub enum FileOpenStatus {
+    DNE,
+    ERROR,
+    SUCCESS
+}
+
+/**
+ * Processes a file request, and returns the status, the buffer, and the Content-Type header.
+ * 
+ * # Arguments
+ * * `path` - The path to the file to be processed.
+ */
+pub async fn process_file_request(path: &str) -> (FileOpenStatus, Option<Vec<u8>>, Option<String>){
+    // if the path is a directory, append index.html
+    let path = if path.ends_with('/') {
+        format!("{}index.html", path)
+    } else {
+        path.to_string()
+    };
+    
+    let mut file = match File::open(&path).await{
+        Ok(file) => file,
+        Err(_) => {
+            // File does not exist
+            return (FileOpenStatus::DNE, None, None);
+        }
+    };
+    let mut buffer = Vec::new();
+    if let Err(_) = file.read_to_end(&mut buffer).await{
+        return (FileOpenStatus::ERROR, None, None);
+    }
+    let content_type = match path.to_lowercase().split('.').last(){
+        Some("html") => Some("text/html".to_string()),
+        Some("css") => Some("text/css".to_string()),
+        Some("js") => Some("text/javascript".to_string()),
+        Some("json") => Some("application/json".to_string()),
+        Some("png") => Some("image/png".to_string()),
+        Some("jpg") => Some("image/jpeg".to_string()),
+        Some("jpeg") => Some("image/jpeg".to_string()),
+        Some("gif") => Some("image/gif".to_string()),
+        Some("svg") => Some("image/svg+xml".to_string()),
+        Some("ico") => Some("image/x-icon".to_string()),
+        Some("pdf") => Some("application/pdf".to_string()),
+        _ => Some("text/plain".to_string())
+    };
+    return (FileOpenStatus::SUCCESS, Some(buffer), content_type);
 }
