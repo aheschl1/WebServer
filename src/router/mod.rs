@@ -2,7 +2,8 @@ use std::future::Future;
 use http_body_util::combinators::BoxBody;
 use hyper::{body::Bytes, Method, Request, Response};
 use hyper::Error;
-
+// TODO simplify the types to allow for reuse
+// NOT IN USE
 /**
  * Create a service that routes requests to different handlers based on the request method.
  * 

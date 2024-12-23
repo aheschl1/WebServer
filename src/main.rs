@@ -2,7 +2,7 @@ use std::{self};
 use core::net::SocketAddr;
 use async_std::path::Path;
 use http_body_util::{combinators::BoxBody, BodyExt};
-use hyper::{body::{Body, Bytes}, Request, Response, StatusCode};
+use hyper::{body::{Body, Bytes}, Method, Request, Response, StatusCode};
 use server_core::full_box_body;
 use tokio::{self, net::TcpListener};
 
@@ -29,30 +29,25 @@ async fn get_handler(request: Request<hyper::body::Incoming>) -> Result<Response
     Ok(Response::new(request.into_body().boxed()))
 }
 
+async fn router(request: Request<hyper::body::Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>{
+    match request.method() {
+        &Method::GET => get_handler(request).await,
+        _ => not_implemented(request).await
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error>{
     // connection system
     let endpoint = SocketAddr::from(([127, 0, 0, 1], 6001));
     let listener = TcpListener::bind(endpoint).await?;
 
-    let routed_service = router::routed_service::<fn(_)->_, _>(
-        not_implemented,
-        Some(get_handler),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None
-    );
     let signal = std::pin::pin!(shutdown_utils::shutdown_on_ctrl_c());
     _ = server_core::start_server(
         listener,
         signal,
         10,
-        routed_service
+        router
     ).await;
 
     Ok(())
