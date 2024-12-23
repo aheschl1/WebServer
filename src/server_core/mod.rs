@@ -13,6 +13,10 @@ use tokio;
 use tokio::net::TcpListener;
 use hyper::server::conn::http1;
 
+use crate::server_utils::FileOpenStatus;
+
+pub mod http;
+
 /**
  * Run a server service using the 'service' method to handle incoming requests.
  * 
@@ -79,12 +83,6 @@ pub fn full_box_body<T:Into<Bytes>>(body: T) -> BoxBody<Bytes, hyper::Error>{
     Full::new(body.into())
         .map_err(|n| match n {})
         .boxed()
-}
-
-pub enum FileOpenStatus {
-    DNE,
-    ERROR,
-    SUCCESS
 }
 
 /**
