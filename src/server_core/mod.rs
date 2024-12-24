@@ -1,4 +1,5 @@
 
+use std::borrow::Borrow;
 use std::future::Future;
 use std::pin::pin;
 
@@ -13,6 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 
 use crate::server_utils::FileOpenStatus;
+use crate::shutdown_utils::ShutdownHelper;
 
 pub mod http;
 pub mod ftp;
@@ -33,20 +35,21 @@ pub async fn start_server<T: Future>(
     listener: TcpListener, 
     mut shutdown_signal: T,
     shutdown_timeout: u64,
-    connection_adaptor: fn(TcpStream, &GracefulShutdown)
+    connection_adaptor: fn(TcpStream, &mut ShutdownHelper)
 ) -> Result<(), std::io::Error>{
-    let shutdown_helper = GracefulShutdown::new();
+    let mut shutdown_helper = ShutdownHelper::new();
     let mut shutdown_signal = pin!(shutdown_signal);
     loop{
         tokio::select! {
-            Ok((stream, _)) = listener.accept() => connection_adaptor(stream, &shutdown_helper),
+            Ok((stream, _)) = listener.accept() => connection_adaptor(stream, &mut shutdown_helper),
             _ = &mut shutdown_signal => {
                 eprintln!("Starting server shutdown");
                 break;
             }
         }
     }
-    
+    drop(listener);
+    // Shutdown the server
     tokio::select! {
         _ = shutdown_helper.shutdown() => {
             eprintln!("Finished shutdown");
