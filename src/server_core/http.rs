@@ -1,7 +1,13 @@
-use async_std::{fs::File, io::ReadExt, path::Path};
 use http_body_util::{combinators::BoxBody, BodyExt};
-use hyper::{body::{Body, Bytes}, header::HeaderName, Method, Request, Response, StatusCode};
-
+use hyper::{body::Bytes, Method, Request, Response, StatusCode};
+use hyper::service::service_fn;
+use std::future::Future;
+use std::pin::pin;
+use hyper_util::rt::TokioIo;
+use hyper_util::server::graceful::GracefulShutdown;
+use tokio;
+use tokio::net::{TcpListener, TcpStream};
+use hyper::server::conn::http1;
 use crate::server_core::{self, full_box_body};
 use crate::server_utils;
 
@@ -40,7 +46,6 @@ async fn get_handler(request: Request<hyper::body::Incoming>) -> Result<Response
             Ok(response)
         }
     }
-
 }
 
 pub async fn router(request: Request<hyper::body::Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>{
@@ -48,4 +53,16 @@ pub async fn router(request: Request<hyper::body::Incoming>) -> Result<Response<
         &Method::GET => get_handler(request).await,
         _ => not_implemented(request).await
     }
+}
+
+pub fn connection_adaptor(stream: TcpStream, shutdown_helper: &GracefulShutdown)
+{
+    let io = TokioIo::new(stream);
+    let conn = http1::Builder::new().serve_connection(io, service_fn(router));
+    let fut = shutdown_helper.watch(conn);
+    tokio::spawn(async {
+        if let Err(e) = fut.await{
+            eprintln!("Error serving connection: {e}");
+        }
+    });
 }

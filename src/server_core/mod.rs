@@ -1,21 +1,22 @@
+
 use std::future::Future;
+use std::pin::pin;
 
 use async_std::fs::File;
 use async_std::io::ReadExt;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
-use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
 use hyper_util::server::graceful::GracefulShutdown;
-use tokio;
-use tokio::net::TcpListener;
-use hyper::server::conn::http1;
+use tokio::net::{TcpListener, TcpStream};
+
 
 use crate::server_utils::FileOpenStatus;
 
 pub mod http;
+pub mod ftp;
+
 
 /**
  * Run a server service using the 'service' method to handle incoming requests.
@@ -28,38 +29,24 @@ pub mod http;
  * * `shutdown_timeout` - The maximum time to wait for the server to shutdown.
  * * `service` - The service function to handle incoming requests.
  */
-pub async fn start_server<T, F, Fut>(
+pub async fn start_server<T: Future>(
     listener: TcpListener, 
     mut shutdown_signal: T,
     shutdown_timeout: u64,
-    service: F) -> Result<(), std::io::Error>
-where 
-    T: Future + Unpin,
-    F: Copy + Fn(Request<hyper::body::Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>> + Send + 'static, // The `Future` returned by `service`
-{
+    connection_adaptor: fn(TcpStream, &GracefulShutdown)
+) -> Result<(), std::io::Error>{
     let shutdown_helper = GracefulShutdown::new();
-
+    let mut shutdown_signal = pin!(shutdown_signal);
     loop{
         tokio::select! {
-            Ok((stream, _)) = listener.accept() => {
-                let io = TokioIo::new(stream);
-                let conn = http1::Builder::new().serve_connection(io, service_fn(service));
-                let fut = shutdown_helper.watch(conn);
-                tokio::spawn(async {
-                    if let Err(e) = fut.await{
-                        eprintln!("Error serving connection: {e}");
-                    }
-                });
-
-            },
+            Ok((stream, _)) = listener.accept() => connection_adaptor(stream, &shutdown_helper),
             _ = &mut shutdown_signal => {
                 eprintln!("Starting server shutdown");
                 break;
             }
         }
     }
-
+    
     tokio::select! {
         _ = shutdown_helper.shutdown() => {
             eprintln!("Finished shutdown");

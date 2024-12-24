@@ -1,1 +1,2 @@
-http_port: 6001
+http_port: 6080
+ftp_control_port: 6021
