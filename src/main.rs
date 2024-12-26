@@ -16,6 +16,7 @@ fn spawn_with_hook(fut: impl Future + Send + 'static, tx: tokio::sync::oneshot::
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error>{
+    println!("{}", sha256::digest("144302144302aA"));
     let config = server_utils::Config::new();
     // connection system
     let endpoint = SocketAddr::from(([127, 0, 0, 1], config.http_port));
