@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 
 use async_std::fs::File;
 use async_std::io::ReadExt;
+use async_std::stream;
 use tokio::net::TcpStream;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 
@@ -29,6 +30,7 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
     
     let mut auth_state = ConnectionState::NotLoggedIn;
     let mut data_stream: Option<TcpStream> = None;
+    let mut transfer_type = TransferType::Ascii;
 
     loop{
         let bytes_read = stream.read(&mut buffer).await?;
@@ -44,30 +46,35 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
         // let response = get_response(command, &input, &mut auth_state, &mut stream).await?;
 
         let response = match command{
-            "USER" => {
+            "USER" => { // Login with username
                 auth_state = do_login_flow(command.split(' ').nth(1).unwrap_or("annonymous"), &mut stream)
                     .await
                     .unwrap_or(ConnectionState::NotLoggedIn);
                 match auth_state{
-                    ConnectionState::LoggedIn => Some("230 User logged in"),
-                    ConnectionState::Annonymous => Some("230 User logged in"),
-                    _ => Some("530 Log in unsuccessful"),
+                    ConnectionState::LoggedIn => Some("230 User logged in".to_string()),
+                    ConnectionState::Annonymous => Some("230 User logged in".to_string()),
+                    _ => Some("530 Log in unsuccessful".to_string()),
                 }
             },
-            "QUIT" => {
+            "QUIT" => { // Disconnect
                 auth_state = ConnectionState::Disconnected;
-                Some("221 Goodbye")
+                Some("221 Goodbye".to_string())
             },
-            "PORT" => {
+            "PORT" => { // Setup active transfer mode
                 if let Ok(stream_result) = make_active_mode_data_connection(&input).await{
                     data_stream = stream_result;
                 };
                 match data_stream{
-                    Some(_) => Some("200 PORT command successful"),
-                    None => Some("425 Can't open data connection.")
+                    Some(_) => Some("200 PORT command successful".to_string()),
+                    None => Some("425 Can't open data connection.".to_string())
                 }
             },
-            _ => Some("502 This service not implemented.")
+            "TYPE" => { // Set transfer type
+                transfer_type = TransferType::from(input.split(' ').nth(1).unwrap_or("A"));
+                let reply = format!("200 Type set to {}", transfer_type);
+                Some(reply)
+            },
+            _ => Some("502 This service not implemented.".to_string())
         };
         if let Some(response) = response{
             stream.write_all(response.as_bytes()).await?;
@@ -76,6 +83,10 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
         if auth_state == ConnectionState::Disconnected{
             break;
         }
+    }
+    // close any potential data streams.
+    if let Some(mut data) = data_stream{
+        data.shutdown().await?;
     }
 
     Ok(())
@@ -166,6 +177,51 @@ enum ConnectionState{
     Disconnected,
     LoggedIn,
     Annonymous
+}
+
+enum TransferMode{
+    Active,
+    Passive
+}
+
+enum TransferType{
+    Ascii,  // 7-bit ASCII data for text files
+    Binary, // 8-bit bytes for images
+    EBCDIC, // Extended Binary Coded Decimal Interchange Code
+}
+
+impl PartialEq for TransferType{
+    fn eq(&self, other: &Self) -> bool{
+        match (self, other){
+            (TransferType::Ascii, TransferType::Ascii) => true,
+            (TransferType::Binary, TransferType::Binary) => true,
+            (TransferType::EBCDIC, TransferType::EBCDIC) => true,
+            _ => false
+        }
+    }
+}
+
+// conversion from strings
+impl From<&str> for TransferType{
+    fn from(s: &str) -> Self{
+        match s{
+            "A" => TransferType::Ascii,
+            "I" => TransferType::Binary,
+            "E" => TransferType::EBCDIC,
+            _ => TransferType::Ascii
+        }
+    }
+}
+
+// to str
+impl std::fmt::Display for TransferType{
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result{
+        match self{
+            TransferType::Ascii => write!(f, "ASCII"),
+            TransferType::Binary => write!(f, "Binary"),
+            TransferType::EBCDIC => write!(f, "EBCDIC")
+        }
+    }
 }
 
 impl PartialEq for ConnectionState{
