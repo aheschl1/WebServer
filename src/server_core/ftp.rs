@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt::format;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -27,6 +28,8 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
     stream.write_all("220 Welcome to ftp server :()".as_bytes()).await?;
     
     let mut auth_state = ConnectionState::NotLoggedIn;
+    let mut data_stream: Option<TcpStream> = None;
+
     loop{
         let bytes_read = stream.read(&mut buffer).await?;
         if bytes_read == 0{
@@ -48,14 +51,23 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
                 match auth_state{
                     ConnectionState::LoggedIn => Some("230 User logged in"),
                     ConnectionState::Annonymous => Some("230 User logged in"),
-                    _ => Some("430 Log in unsuccessful"),
+                    _ => Some("530 Log in unsuccessful"),
                 }
             },
-            "BYE" => {
+            "QUIT" => {
                 auth_state = ConnectionState::Disconnected;
                 Some("221 Goodbye")
             },
-            _ => Some("400  This service not implemented.")
+            "PORT" => {
+                if let Ok(stream_result) = make_active_mode_data_connection(&input).await{
+                    data_stream = stream_result;
+                };
+                match data_stream{
+                    Some(_) => Some("200 PORT command successful"),
+                    None => Some("425 Can't open data connection.")
+                }
+            },
+            _ => Some("502 This service not implemented.")
         };
         if let Some(response) = response{
             stream.write_all(response.as_bytes()).await?;
@@ -67,6 +79,31 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
     }
 
     Ok(())
+}
+
+async fn make_active_mode_data_connection(input: &str) -> Result<Option<TcpStream>, tokio::io::Error>{
+    let mut parts = input.split(' ').skip(1); // remove command
+    let mut parts = parts.next().unwrap().split(',');            // split the ip and port
+
+    let ip = format!(
+        "{first}.{second}.{third}.{fourth}",
+        first = parts.next().unwrap(),
+        second = parts.next().unwrap(),
+        third = parts.next().unwrap(),
+        fourth = parts.next().unwrap()
+    );
+    let port = format!(
+        "{}{}",
+        parts.next().unwrap(),
+        parts.next().unwrap()
+    );
+
+    let addr = format!("{ip}:{port}");
+    let stream = tokio::select!{
+        Ok(stream) = TcpStream::connect(addr) => Some(stream),
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => None
+    };
+    Ok(stream)
 }
 
 async fn do_login_flow(username: &str, stream: &mut TcpStream) -> Result<ConnectionState, std::io::Error>{
@@ -87,7 +124,7 @@ async fn do_login_flow(username: &str, stream: &mut TcpStream) -> Result<Connect
             let password = input.split(' ').nth(1).unwrap_or("");
             password_ok = check_password(username, password).await;
             if !password_ok{
-                stream.write_all(format!("431 Login incorrect {} attempts remaining.", 5-attempts).as_bytes()).await?;
+                stream.write_all(format!("530 Login incorrect {} attempts remaining.", 5-attempts).as_bytes()).await?;
             }
         }else{
             return Ok(ConnectionState::NotLoggedIn);
