@@ -1,3 +1,6 @@
+mod status;
+mod utils;
+
 use std::borrow::Cow;
 use std::fmt::format;
 use std::pin::Pin;
@@ -10,8 +13,16 @@ use tokio::net::TcpStream;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 
 use crate::shutdown_utils::ShutdownHelper;
+use status::{ConnectionState, TransferType, TransferMode, TransferStructure};
+use utils::hash_password;
 
-
+/**
+ * Handle a new connection.
+ * 
+ * This function is called when a new connection is made to the server, and is the starting point for handling the connection.
+ * 
+ * Spawns handle_connection as a tokio task, and registers a shutdown handle.
+ */
 pub fn connection_adaptor(stream: TcpStream, shutdown_helper: &mut ShutdownHelper){
     let conn = handle_connection(stream);
     let handle = shutdown_helper.register();
@@ -31,6 +42,8 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
     let mut auth_state = ConnectionState::NotLoggedIn;
     let mut data_stream: Option<TcpStream> = None;
     let mut transfer_type = TransferType::Ascii;
+    let mut transfer_mode = TransferMode::Stream;
+    let mut transfer_structure = TransferStructure::File;
 
     loop{
         let bytes_read = stream.read(&mut buffer).await?;
@@ -63,8 +76,10 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
             "PORT" => { // Setup active transfer mode
                 if let Ok(stream_result) = make_active_mode_data_connection(&input).await{
                     data_stream = stream_result;
-                };
-                match data_stream{
+                }else{
+                    data_stream = None;
+                }
+                match &data_stream{
                     Some(_) => Some("200 PORT command successful".to_string()),
                     None => Some("425 Can't open data connection.".to_string())
                 }
@@ -74,6 +89,37 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
                 let reply = format!("200 Type set to {}", transfer_type);
                 Some(reply)
             },
+            "MODE" => {
+                transfer_mode = TransferMode::from(input.split(' ').nth(1).unwrap_or("S"));
+                let reply = format!("200 Transfer mode set to {}", transfer_mode);
+                Some(reply)
+            },
+            "STRU" => {
+                transfer_structure = TransferStructure::from(input.split(' ').nth(1).unwrap_or("F"));
+                let reply = format!("200 Transfer structure set to {}", transfer_structure);
+                Some(reply)
+            },
+            "RETR" => {
+                let path = input.split(' ').nth(1); 
+                match (path, data_stream.as_mut()){
+                    (_, None) => Some("425 No data connection established.".to_string()),
+                    (Some(path), Some(mut ds)) => {
+                        let result = retrieve_file(
+                            path, 
+                            &mut ds,
+                            transfer_mode.clone(), 
+                            transfer_type.clone(), 
+                            transfer_structure.clone(), 
+                            auth_state.clone()
+                        ).await;
+                        match result{
+                            Ok(_) => Some("226 Transfer complete.".to_string()),
+                            Err(_) => Some("451 Requested action aborted.".to_string())
+                        }
+                    },
+                    (None, _) => Some("501 No file name given.".to_string())
+                }
+            }
             _ => Some("502 This service not implemented.".to_string())
         };
         if let Some(response) = response{
@@ -84,12 +130,64 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
             break;
         }
     }
-    // close any potential data streams.
-    if let Some(mut data) = data_stream{
-        data.shutdown().await?;
-    }
 
     Ok(())
+}
+
+async fn retrieve_file(
+    path: &str, 
+    stream: &mut TcpStream, 
+    mode: TransferMode, 
+    data_type: TransferType, 
+    structure: TransferStructure, 
+    auth_state: ConnectionState) -> Result<String, tokio::io::Error>
+{
+    // make sure structure is File, or send error NOT IMPLEMENTED
+    if structure != TransferStructure::File{
+        return Ok(String::from("504 Command not implemented for that parameter. (Can only handle File STRU)"));
+    }
+
+    if !utils::auth_can_access_file(path, auth_state){
+        return Ok(String::from("550 Permission denied."));
+    }
+    // we need to make sure the file actually exists.
+    let file = match File::open(path).await{
+        Ok(file) => file,
+        Err(_) => return Ok(String::from("550 File not found."))
+    };
+    // based on the transfer mode, we need to send the file in the correct way.
+    match mode {
+        TransferMode::Stream => {
+            let mut reader = file;
+            let mut buffer = [0u8; 1024];
+            loop{
+                let bytes_read = reader.read(&mut buffer).await?;
+                if bytes_read == 0{
+                    break;
+                }
+                match data_type {
+                    TransferType::Ascii => {
+                        let mut ascii = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+                        ascii = ascii.replace("\n", "\r\n");
+                        stream.write_all(ascii.as_bytes()).await?;
+                    },
+                    TransferType::Binary => {
+                        stream.write_all(&buffer[..bytes_read]).await?;
+                    },
+                    _ => {
+                        // Error, we don't support this type.
+                        return Err(io::Error::new(io::ErrorKind::Other, "Unsupported data type."));
+                    }
+                }
+            }
+        },
+        _ => {
+            // Server error
+            return Err(io::Error::new(io::ErrorKind::Other, "Server error."));
+        }
+    }
+
+    Ok(String::from("226 Transfer complete."))
 }
 
 async fn make_active_mode_data_connection(input: &str) -> Result<Option<TcpStream>, tokio::io::Error>{
@@ -161,77 +259,4 @@ async fn check_password(username: &str, password: &str) -> bool{
         return password_hash == hash;
     }
     return false;
-}
-
-/**
- * Hash the password using sha256.
- */
-fn hash_password(password: &str) -> String{
-    // hash the password using a secure hashing algorithm.
-    // return the hashed password.
-    sha256::digest(password)
-}
-
-enum ConnectionState{
-    NotLoggedIn,
-    Disconnected,
-    LoggedIn,
-    Annonymous
-}
-
-enum TransferMode{
-    Active,
-    Passive
-}
-
-enum TransferType{
-    Ascii,  // 7-bit ASCII data for text files
-    Binary, // 8-bit bytes for images
-    EBCDIC, // Extended Binary Coded Decimal Interchange Code
-}
-
-impl PartialEq for TransferType{
-    fn eq(&self, other: &Self) -> bool{
-        match (self, other){
-            (TransferType::Ascii, TransferType::Ascii) => true,
-            (TransferType::Binary, TransferType::Binary) => true,
-            (TransferType::EBCDIC, TransferType::EBCDIC) => true,
-            _ => false
-        }
-    }
-}
-
-// conversion from strings
-impl From<&str> for TransferType{
-    fn from(s: &str) -> Self{
-        match s{
-            "A" => TransferType::Ascii,
-            "I" => TransferType::Binary,
-            "E" => TransferType::EBCDIC,
-            _ => TransferType::Ascii
-        }
-    }
-}
-
-// to str
-impl std::fmt::Display for TransferType{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result{
-        match self{
-            TransferType::Ascii => write!(f, "ASCII"),
-            TransferType::Binary => write!(f, "Binary"),
-            TransferType::EBCDIC => write!(f, "EBCDIC")
-        }
-    }
-}
-
-impl PartialEq for ConnectionState{
-    fn eq(&self, other: &Self) -> bool{
-        match (self, other){
-            (ConnectionState::NotLoggedIn, ConnectionState::NotLoggedIn) => true,
-            (ConnectionState::Disconnected, ConnectionState::Disconnected) => true,
-            (ConnectionState::LoggedIn, ConnectionState::LoggedIn) => true,
-            (ConnectionState::Annonymous, ConnectionState::Annonymous) => true,
-            _ => false
-        }
-    }
 }
