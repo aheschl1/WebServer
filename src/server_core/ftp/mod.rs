@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 
 use async_std::fs::File;
 use async_std::io::{ReadExt, WriteExt};
+use async_std::path::Path;
 use async_std::{path, stream};
 use tokio::net::TcpStream;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
@@ -46,6 +47,7 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
     let mut transfer_type = TransferType::Ascii;
     let mut transfer_mode = TransferMode::Stream;
     let mut transfer_structure = TransferStructure::File;
+    let mut current_directory = String::from("/");
 
     loop{
         println!("Waiting for input");
@@ -145,6 +147,54 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
                     }
                 }
             },
+            "CWD" => {
+                let path = input.split(' ').nth(1).unwrap_or("/");
+                // check if it exists
+                let old_dir = current_directory.clone();
+                if path.starts_with("./"){
+                    current_directory = format!("{current_directory}/{append}", append=path[2..].to_string());
+                }else if path.starts_with('/'){
+                    current_directory = path.to_string();
+                }else{
+                    current_directory = format!("{current_directory}/{path}");
+                }
+                match Path::new(current_directory.as_str()).exists().await{
+                    true => {
+                        Some("250 Directory successfully changed.".to_string())
+                    },
+                    false => {
+                        current_directory = old_dir;
+                        Some("550 Failed to change directory.".to_string())
+                    }
+                }
+            },
+            "CDUP" => {
+                // move back
+                let n_slash = current_directory.chars().filter(|c| *c=='/').count();
+                let mut result = None;
+                if n_slash < 2{
+                    result = Some("550 Failed to change directory.".to_string());
+                }else{
+                    let chunks: Vec<&str> = current_directory.split('/').collect();
+                    current_directory = chunks[..chunks.len()-1].join("/");
+                    result = Some("250 Directory successfully changed.".to_string());
+                }
+                result
+            },
+            "PWD" => Some(format!("257 \"{current_directory}\" is the current directory")),
+            "LIST" => {
+                let path = input.split(' ').nth(1).unwrap_or(current_directory.as_str());
+                match (Path::new(path).exists().await, data_stream.as_mut()) {
+                    (_, None) => Some("425 No data connection established.".to_string()),
+                    (false, _) => Some("550 Directory not found.".to_string()),
+                    (true, Some(ds)) => {
+                        match list_directory(path.to_string(), &mut stream, ds).await{
+                            Ok(r) => r,
+                            Err(_) => Some("451 Requested action aborted.".to_string())
+                        }
+                    },
+                }
+            },
             "NOOP" => Some("200 NOOP command successful.".to_string()),
             _ => Some("502 This service not implemented.".to_string())
         };
@@ -161,6 +211,11 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
     }
 
     Ok(())
+}
+
+async fn list_directory(path: String, control_stream: &mut TcpStream, data_stream:  &mut TcpStream) -> Result<Option<String>, tokio::io::Error>{
+
+    Ok(Some("Ok".to_string()))
 }
 
 async fn retrieve_file(
