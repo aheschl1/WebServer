@@ -7,8 +7,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use async_std::fs::File;
-use async_std::io::ReadExt;
-use async_std::stream;
+use async_std::io::{ReadExt, WriteExt};
+use async_std::{path, stream};
 use tokio::net::TcpStream;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 
@@ -37,7 +37,9 @@ pub fn connection_adaptor(stream: TcpStream, shutdown_helper: &mut ShutdownHelpe
 
 async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error>{
     let mut buffer = [0u8; 1024];
-    stream.write_all("220 Welcome to ftp server :()".as_bytes()).await?;
+    stream.write_all("220 Welcome to ftp server :()\r\n".as_bytes()).await?;
+
+    println!("Received a new connection.");
     
     let mut auth_state = ConnectionState::NotLoggedIn;
     let mut data_stream: Option<TcpStream> = None;
@@ -46,6 +48,7 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
     let mut transfer_structure = TransferStructure::File;
 
     loop{
+        println!("Waiting for input");
         let bytes_read = stream.read(&mut buffer).await?;
         if bytes_read == 0{
             break;
@@ -60,7 +63,8 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
 
         let response = match command{
             "USER" => { // Login with username
-                auth_state = do_login_flow(command.split(' ').nth(1).unwrap_or("annonymous"), &mut stream)
+                let username = input.split(' ').nth(1).unwrap_or("annonymous");
+                auth_state = do_login_flow(username, &mut stream)
                     .await
                     .unwrap_or(ConnectionState::NotLoggedIn);
                 match auth_state{
@@ -103,6 +107,7 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
                 let path = input.split(' ').nth(1); 
                 match (path, data_stream.as_mut()){
                     (_, None) => Some("425 No data connection established.".to_string()),
+                    (None, _) => Some("501 No file name given.".to_string()),
                     (Some(path), Some(mut ds)) => {
                         let result = retrieve_file(
                             path, 
@@ -113,22 +118,46 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
                             auth_state.clone()
                         ).await;
                         match result{
-                            Ok(_) => Some("226 Transfer complete.".to_string()),
+                            Ok(m) => Some(m),
                             Err(_) => Some("451 Requested action aborted.".to_string())
                         }
-                    },
-                    (None, _) => Some("501 No file name given.".to_string())
+                    }
                 }
-            }
+            },
+            "STOR" => {
+                let path = input.split(' ').nth(1);
+                match (path, data_stream.as_mut()){
+                    (_, None) => Some("425 No data connection established.".to_string()),
+                    (None, _) => Some("501 No file name given.".to_string()),
+                    (Some(path), Some(mut ds)) => {
+                        let result = receive_file(
+                            path, 
+                            &mut ds,
+                            transfer_mode.clone(), 
+                            transfer_type.clone(), 
+                            transfer_structure.clone(), 
+                            auth_state.clone()
+                        ).await;
+                        match result{
+                            Ok(m) => Some(m),
+                            Err(_) => Some("451 Requested action aborted.".to_string())
+                        }
+                    }
+                }
+            },
+            "NOOP" => Some("200 NOOP command successful.".to_string()),
             _ => Some("502 This service not implemented.".to_string())
         };
         if let Some(response) = response{
-            stream.write_all(response.as_bytes()).await?;
+            stream.write_all(format!("{response}\r\n").as_bytes()).await?;
         }
 
         if auth_state == ConnectionState::Disconnected{
             break;
         }
+    }
+    if let Some(ds) = data_stream {
+        drop(ds);
     }
 
     Ok(())
@@ -190,6 +219,43 @@ async fn retrieve_file(
     Ok(String::from("226 Transfer complete."))
 }
 
+async fn receive_file(
+    path: &str, 
+    stream: &mut TcpStream, 
+    mode: TransferMode, 
+    _data_type: TransferType, 
+    structure: TransferStructure, 
+    auth_state: ConnectionState) -> Result<String, tokio::io::Error>
+{
+    // make sure structure is File, or send error NOT IMPLEMENTED
+    if structure != TransferStructure::File{
+        return Ok(String::from("504 Command not implemented for that parameter. (Can only handle File STRU)"));
+    }
+
+    if !utils::auth_can_access_file(path, auth_state){
+        return Ok(String::from("550 Permission denied."));
+    }
+
+    match mode {
+        TransferMode::Stream => {
+            let mut file = File::create(path).await?;
+            let mut buffer = [0u8; 8192];
+            loop {
+                let bytes_read = stream.read(&mut buffer).await?;
+                if bytes_read == 0 {
+                    break; // End of data
+                }
+                file.write_all(&buffer[..bytes_read]).await?;
+            }
+        },
+        _ => {
+            return Err(io::Error::new(io::ErrorKind::Other, "Server error."));
+        }
+    }
+
+    Ok("226 Transfer complete".to_string())
+}
+
 async fn make_active_mode_data_connection(input: &str) -> Result<Option<TcpStream>, tokio::io::Error>{
     let mut parts = input.split(' ').skip(1); // remove command
     let mut parts = parts.next().unwrap().split(',');            // split the ip and port
@@ -217,35 +283,36 @@ async fn make_active_mode_data_connection(input: &str) -> Result<Option<TcpStrea
 
 async fn do_login_flow(username: &str, stream: &mut TcpStream) -> Result<ConnectionState, std::io::Error>{
     // we have an original username, now, we try to authenticate them. return Ok(()) when done.
-    if username == "anonymous"{
+    if username == "annonymous"{
         return Ok(ConnectionState::Annonymous);
     }
     let mut password_ok = false;
     let mut attempts = 0;
     while !password_ok && attempts < 5{
         attempts += 1;
-        stream.write_all("331 Password required for {username}.".as_bytes()).await?;
+        stream.write_all(format!("331 Password required for {username}.\r\n").as_bytes()).await?;
         let mut buffer = [0u8; 1024];
         let bytes_read = stream.read(&mut buffer).await?;
         let input = String::from_utf8_lossy(&buffer[..bytes_read]);
-        let command = input.split(' ').next().unwrap_or("Bye");
+        let command = input.split(' ').nth(0).unwrap_or("Bye");
         if command == "PASS"{
-            let password = input.split(' ').nth(1).unwrap_or("");
+            let password = input.split(' ').nth(1).unwrap_or("").trim();
             password_ok = check_password(username, password).await;
             if !password_ok{
-                stream.write_all(format!("530 Login incorrect {} attempts remaining.", 5-attempts).as_bytes()).await?;
+                stream.write_all(format!("530 Login incorrect {} attempts remaining.\r\n", 5-attempts).as_bytes()).await?;
             }
         }else{
             return Ok(ConnectionState::NotLoggedIn);
         }
     }
 
-    Ok(ConnectionState::LoggedIn)
+    Ok(if password_ok {ConnectionState::LoggedIn} else {ConnectionState::NotLoggedIn})
 }
 
 async fn check_password(username: &str, password: &str) -> bool{
     // read the hashed password from ~/.ftp_server/username.passwd
     // compare the hashed password with the password given.
+    println!("{username}:{password}");
     let password_hash: String = hash_password(password);
     let actual_hash = match File::open(format!("/home/andrewheschl/ftp_server/{username}.passwd")).await{
         Ok(mut file) => {
@@ -256,7 +323,7 @@ async fn check_password(username: &str, password: &str) -> bool{
         Err(_) => None 
     };
     if let Some(hash) = actual_hash  {
-        return password_hash == hash;
+        return password_hash.trim() == hash.trim();
     }
     return false;
 }

@@ -16,7 +16,6 @@ fn spawn_with_hook(fut: impl Future + Send + 'static, tx: tokio::sync::oneshot::
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error>{
-    println!("{}", sha256::digest("144302144302aA"));
     let config = server_utils::Config::new();
     // connection system
     let endpoint = SocketAddr::from(([127, 0, 0, 1], config.http_port));
@@ -39,7 +38,7 @@ async fn main() -> Result<(), std::io::Error>{
     let fcp = server_core::start_server(
         control_listener,
         shutdown_utils::shutdown_on_ctrl_c(),
-        20,
+        10,
         server_core::ftp::connection_adaptor
     );
     spawn_with_hook(fcp, tx_ftp);
