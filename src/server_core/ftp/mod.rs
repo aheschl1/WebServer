@@ -215,7 +215,25 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), tokio::io::Error
 
 async fn list_directory(path: String, control_stream: &mut TcpStream, data_stream:  &mut TcpStream) -> Result<Option<String>, tokio::io::Error>{
 
-    Ok(Some("Ok".to_string()))
+    let mut listing = String::new();
+
+    for entry in std::fs::read_dir(path)?{
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        let file_type = if metadata.is_dir() { "d" } else { "-" };
+        let file_size = metadata.len();
+        let file_name = entry.file_name().into_string().unwrap_or_default();
+
+        listing.push_str(&format!(
+            "{}rw-r--r-- 1 user group {:>8} {}\r\n",
+            file_type, file_size, file_name
+        ));
+    }
+    control_stream.write_all("150 Here comes the directory listing.\r\n".as_bytes()).await?;
+    println!("LISTING: {listing}");
+    data_stream.write_all(listing.as_bytes()).await?;
+
+    Ok(Some("226 Directory send OK.".to_string()))
 }
 
 async fn retrieve_file(
@@ -322,12 +340,8 @@ async fn make_active_mode_data_connection(input: &str) -> Result<Option<TcpStrea
         third = parts.next().unwrap(),
         fourth = parts.next().unwrap()
     );
-    let port = format!(
-        "{}{}",
-        parts.next().unwrap(),
-        parts.next().unwrap()
-    );
-
+    let port = parts.next().unwrap().parse::<u16>().unwrap() * 256 + parts.next().unwrap().parse::<u16>().unwrap();
+    println!("CONNECTING TO {ip}:{port}");
     let addr = format!("{ip}:{port}");
     let stream = tokio::select!{
         Ok(stream) = TcpStream::connect(addr) => Some(stream),
